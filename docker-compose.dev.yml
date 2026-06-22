@@ -1,0 +1,30 @@
+version: '3.9'
+
+# Usar con: docker compose -f docker-compose.yml -f docker-compose.dev.yml up
+# Solo para desarrollo local — NUNCA en producción
+
+services:
+  storage-gateway:
+    build:
+      target: development
+    environment:
+      NODE_ENV: development
+    command: sh -c "ls node_modules/.bin/nest && node_modules/.bin/nest start --watch"
+    volumes:
+      - ./apps/storage-gateway:/app
+    ports:
+      - "3100:3100"
+      - "9229:9229"
+
+  # pgAdmin solo disponible en dev
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: suite_storage_pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@suite-os.dev   # ← cambiar .local por .dev o .com
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-admin123}
+
+  # En dev exponemos postgres solo para herramientas locales
+  postgres:
+    ports:
+      - "127.0.0.1:5432:5432"   # solo localhost, no 0.0.0.0

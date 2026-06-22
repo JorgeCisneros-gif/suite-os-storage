@@ -1,0 +1,97 @@
+version: '3.9'
+
+services:
+  # ─────────────────────────────────────────
+  # API Gateway - único servicio expuesto
+  # ─────────────────────────────────────────
+  storage-gateway:
+    build:
+      context: ./apps/storage-gateway
+      dockerfile: Dockerfile
+    container_name: suite_storage_gateway
+    restart: unless-stopped
+    ports:
+      - "3100:3100"       # único puerto expuesto al host
+    environment:
+      NODE_ENV: production
+      PORT: 3100
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      REDIS_URL: redis://redis:6379
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}         # AES-256, 32 chars
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET}
+      GOOGLE_CALLBACK_URL: ${GOOGLE_CALLBACK_URL}
+      JWT_SECRET: ${JWT_SECRET}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY}     # clave que usan tus otras apps
+      DEFAULT_RETENTION_DAYS: ${DEFAULT_RETENTION_DAYS:-90}
+      ERROR_RETENTION_DAYS: ${ERROR_RETENTION_DAYS:-30}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - storage_internal
+      - storage_external
+    volumes:
+      - gateway_temp:/app/temp   # archivos en tránsito (memoria temporal)
+
+  # ─────────────────────────────────────────
+  # PostgreSQL - solo red interna, sin puerto expuesto
+  # ─────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: suite_storage_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro   # scripts iniciales
+    networks:
+      - storage_internal     # SOLO red interna, nadie de afuera puede conectarse
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    # NO hay "ports:" aquí adrede → la DB no es accesible desde el host
+
+  # ─────────────────────────────────────────
+  # Redis - solo red interna
+  # ─────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: suite_storage_redis
+    restart: unless-stopped
+    command: redis-server --requirepass ${REDIS_PASSWORD} --appendonly yes
+    volumes:
+      - redisdata:/data
+    networks:
+      - storage_internal     # SOLO red interna
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    # NO hay "ports:" aquí adrede
+
+# ─────────────────────────────────────────
+# Redes
+# ─────────────────────────────────────────
+networks:
+  storage_internal:
+    driver: bridge
+    internal: true    # ← completamente aislada, sin acceso a internet
+  storage_external:
+    driver: bridge    # solo el gateway toca esta red
+
+# ─────────────────────────────────────────
+# Volúmenes
+# ─────────────────────────────────────────
+volumes:
+  pgdata:
+  redisdata:
+  gateway_temp:

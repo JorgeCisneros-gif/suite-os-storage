@@ -1,0 +1,101 @@
+name: suite-os-storage
+
+services:
+  # ── Gateway (NestJS) ─────────────────────────────────────
+  gateway:
+    build:
+      context: ./apps/storage-gateway
+      dockerfile: Dockerfile
+    container_name: suite_storage_gateway
+    restart: unless-stopped
+    ports:
+      - "3100:3100"
+    environment:
+      NODE_ENV: ${NODE_ENV:-production}
+      PORT: 3100
+      DATABASE_URL: postgresql://storage_user:${POSTGRES_PASSWORD}@postgres:5432/suite_storage
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET}
+      GOOGLE_CALLBACK_URL: ${GOOGLE_CALLBACK_URL}
+      DEFAULT_RETENTION_DAYS: ${DEFAULT_RETENTION_DAYS:-90}
+      ERROR_RETENTION_DAYS: ${ERROR_RETENTION_DAYS:-30}
+      MAX_UPLOAD_RETRIES: ${MAX_UPLOAD_RETRIES:-3}
+      DEPARMENTOS_URL: ${DEPARMENTOS_URL}
+      INVENTORYOS_URL: ${INVENTORYOS_URL}
+      # Path dentro del contenedor donde se montará el volume
+      TEMP_STORAGE_DIR: /var/lib/suite-storage/temp
+      CORS_ORIGINS: ${CORS_ORIGINS}
+    volumes:
+      # Volume persistente para los archivos del storage temporal.
+      # En el host vive en suite_storage_temp (o ruta personalizada con SUITE_STORAGE_TEMP_HOST_PATH).
+      - storage_temp:/var/lib/suite-storage/temp
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - suite_infra_net
+
+  # ── PostgreSQL ───────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: suite_storage_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: suite_storage
+      POSTGRES_USER: storage_user
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - storage_pgdata:/var/lib/postgresql/data
+    networks:
+      - suite_infra_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U storage_user -d suite_storage"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Redis (cache OAuth tokens) ───────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: suite_storage_redis
+    restart: unless-stopped
+    command: redis-server --requirepass ${REDIS_PASSWORD} --appendonly yes
+    volumes:
+      - storage_redis:/data
+    networks:
+      - suite_infra_net
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a ${REDIS_PASSWORD} ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  storage_pgdata:
+    name: suite_storage_pgdata
+  storage_redis:
+    name: suite_storage_redis
+  storage_temp:
+    name: suite_storage_temp
+    # Para backups y compatibilidad con backups manuales del host,
+    # puedes hacer que este volume apunte a una ruta del host con:
+    #
+    # storage_temp:
+    #   driver: local
+    #   driver_opts:
+    #     type: none
+    #     o: bind
+    #     device: /var/lib/suite-storage/temp
+    #
+    # En desarrollo es opcional; en producción del serverj01 es lo
+    # recomendado para que puedas hacer backups con cp directo.
+
+networks:
+  suite_infra_net:
+    name: suite_infra_net
+    driver: bridge
