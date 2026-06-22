@@ -1,97 +1,141 @@
-version: '3.9'
+name: suite-os-storage
+
+# ============================================================
+#  Suite-OS Storage Gateway — Docker Compose
+#  Compatible con dev local Y producción en serverj01.
+#
+#  Modo dev local:
+#    docker compose up
+#    (usa puertos expuestos 5433/6380/3100 en localhost)
+#
+#  Modo producción (serverj01):
+#    docker compose up -d
+#    (storage_gateway accesible vía edify_network y
+#     OAuth callback expuesto vía cloudflared)
+# ============================================================
 
 services:
-  # ─────────────────────────────────────────
-  # API Gateway - único servicio expuesto
-  # ─────────────────────────────────────────
-  storage-gateway:
-    build:
-      context: ./apps/storage-gateway
-      dockerfile: Dockerfile
-    container_name: suite_storage_gateway
-    restart: unless-stopped
-    ports:
-      - "3100:3100"       # único puerto expuesto al host
-    environment:
-      NODE_ENV: production
-      PORT: 3100
-      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
-      REDIS_URL: redis://redis:6379
-      ENCRYPTION_KEY: ${ENCRYPTION_KEY}         # AES-256, 32 chars
-      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID}
-      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET}
-      GOOGLE_CALLBACK_URL: ${GOOGLE_CALLBACK_URL}
-      JWT_SECRET: ${JWT_SECRET}
-      INTERNAL_API_KEY: ${INTERNAL_API_KEY}     # clave que usan tus otras apps
-      DEFAULT_RETENTION_DAYS: ${DEFAULT_RETENTION_DAYS:-90}
-      ERROR_RETENTION_DAYS: ${ERROR_RETENTION_DAYS:-30}
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    networks:
-      - storage_internal
-      - storage_external
-    volumes:
-      - gateway_temp:/app/temp   # archivos en tránsito (memoria temporal)
 
-  # ─────────────────────────────────────────
-  # PostgreSQL - solo red interna, sin puerto expuesto
-  # ─────────────────────────────────────────
-  postgres:
+  # ── Postgres dedicado del storage ──────────────────────────
+  storage_db:
     image: postgres:16-alpine
-    container_name: suite_storage_postgres
+    container_name: storage_db
     restart: unless-stopped
     environment:
-      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_DB:       ${POSTGRES_DB:-suite_storage}
+      POSTGRES_USER:     ${POSTGRES_USER:-storage_user}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      POSTGRES_DB: ${POSTGRES_DB}
     volumes:
-      - pgdata:/var/lib/postgresql/data
-      - ./postgres/init:/docker-entrypoint-initdb.d:ro   # scripts iniciales
+      - storage_pgdata:/var/lib/postgresql/data
     networks:
-      - storage_internal     # SOLO red interna, nadie de afuera puede conectarse
+      - edify_network
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-storage_user} -d ${POSTGRES_DB:-suite_storage}"]
       interval: 10s
       timeout: 5s
       retries: 5
-    # NO hay "ports:" aquí adrede → la DB no es accesible desde el host
+    # Solo expuesto en dev local (5433 para no chocar con edify_db en 5432)
+    # En producción se comenta porque se accede solo vía red interna
+    # ports:
+    #   - "5433:5432"
 
-  # ─────────────────────────────────────────
-  # Redis - solo red interna
-  # ─────────────────────────────────────────
-  redis:
+  # ── Redis dedicado del storage ─────────────────────────────
+  storage_redis:
     image: redis:7-alpine
-    container_name: suite_storage_redis
+    container_name: storage_redis
     restart: unless-stopped
     command: redis-server --requirepass ${REDIS_PASSWORD} --appendonly yes
     volumes:
-      - redisdata:/data
+      - storage_redis_data:/data
     networks:
-      - storage_internal     # SOLO red interna
+      - edify_network
     healthcheck:
-      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      test: ["CMD-SHELL", "redis-cli -a $${REDIS_PASSWORD} ping | grep PONG"]
       interval: 10s
       timeout: 5s
       retries: 5
-    # NO hay "ports:" aquí adrede
+    # ports:
+    #   - "6380:6379"
 
-# ─────────────────────────────────────────
-# Redes
-# ─────────────────────────────────────────
-networks:
-  storage_internal:
-    driver: bridge
-    internal: true    # ← completamente aislada, sin acceso a internet
-  storage_external:
-    driver: bridge    # solo el gateway toca esta red
+  # ── Storage Gateway (NestJS) ───────────────────────────────
+  storage_gateway:
+    build:
+      context: ./apps/storage-gateway
+      target: production
+    container_name: storage_gateway
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      PORT: 3100
 
-# ─────────────────────────────────────────
-# Volúmenes
-# ─────────────────────────────────────────
+      # Postgres (conexión interna por nombre de servicio)
+      DATABASE_URL: postgresql://${POSTGRES_USER:-storage_user}:${POSTGRES_PASSWORD}@storage_db:5432/${POSTGRES_DB:-suite_storage}
+
+      # Redis (conexión interna por nombre de servicio)
+      REDIS_URL: redis://:${REDIS_PASSWORD}@storage_redis:6379
+
+      # Cifrado de credentials en DB
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+
+      # API key para clientes (DepartmentOS, InventoryOS, etc.)
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY}
+
+      # OAuth Google Drive
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET}
+      GOOGLE_CALLBACK_URL: ${GOOGLE_CALLBACK_URL}
+
+      # Storage temporal
+      TEMP_STORAGE_DIR: /var/lib/suite-storage/temp
+      DEFAULT_RETENTION_DAYS: ${DEFAULT_RETENTION_DAYS:-90}
+      ERROR_RETENTION_DAYS: ${ERROR_RETENTION_DAYS:-30}
+      MAX_UPLOAD_RETRIES: ${MAX_UPLOAD_RETRIES:-3}
+
+      # URLs de redirección post-OAuth
+      DEPARMENTOS_URL: ${DEPARMENTOS_URL:-https://deparmentos.suite-os.app}
+      INVENTORYOS_URL: ${INVENTORYOS_URL:-https://inventoryos.suite-os.app}
+
+      # CORS (frontends que pueden hacer llamadas)
+      CORS_ORIGINS: ${CORS_ORIGINS:-https://deparmentos.suite-os.app,https://inventoryos.suite-os.app}
+
+    volumes:
+      # Volume persistente para los archivos del storage temporal.
+      # Bind mount para que sea fácil hacer backups con cp/tar.
+      - ./temp-storage:/var/lib/suite-storage/temp
+
+    depends_on:
+      storage_db:
+        condition: service_healthy
+      storage_redis:
+        condition: service_healthy
+
+    networks:
+      - edify_network
+
+    # Puerto 3100 expuesto SOLO en localhost (127.0.0.1) del server.
+    # Esto permite que cloudflared (corriendo como systemd en el host)
+    # alcance el gateway en localhost:3100 para enrutar
+    # storage.suite-os.app.
+    #
+    # NO es público — no es accesible desde Internet ni desde otras IPs.
+    # DepartmentOS sigue llamando por red Docker interna:
+    #   http://storage_gateway:3100/api/v1/...
+    ports:
+      - "127.0.0.1:3100:3100"
+
+# ── Volúmenes persistentes ─────────────────────────────────
 volumes:
-  pgdata:
-  redisdata:
-  gateway_temp:
+  storage_pgdata:
+    name: storage_pgdata
+  storage_redis_data:
+    name: storage_redis_data
+
+# ── Red ────────────────────────────────────────────────────
+#
+# edify_network es EXTERNA: ya fue creada por el compose de DepartmentOS.
+# Solo nos unimos a ella para que los servicios se vean entre sí.
+networks:
+  edify_network:
+    name: edify_network
+    external: true
