@@ -16,25 +16,24 @@ import { RedisModule } from './redis/redis.module';
 import { LoggingModule } from './common/logging.module';
 
 /**
- * Configuración TypeORM con dos modos:
+ * Configuración TypeORM.
  *
- * 1. DATABASE_URL completa (modo Docker / producción):
- *    DATABASE_URL=postgresql://user:pass@host:5432/db
+ * Soporta dos modos de conexión:
+ * 1. DATABASE_URL completa (Docker / producción)
+ * 2. Variables separadas DB_HOST/DB_PORT/etc (dev local)
  *
- * 2. Variables separadas (modo dev local):
- *    DB_HOST=localhost
- *    DB_PORT=5432
- *    DB_USER=storage_user
- *    POSTGRES_PASSWORD=...
- *    DB_NAME=suite_storage
+ * SSL es OPCIONAL. Solo se activa si DB_SSL=true en el .env.
+ * Para conexiones internas en Docker network NO se requiere SSL
+ * (todo el tráfico es privado dentro de la red Docker).
  *
- * Si DATABASE_URL está presente, tiene prioridad. Sino, se usan las variables separadas.
+ * Si en el futuro conectas a una DB externa (AWS RDS, Heroku, etc.)
+ * que SÍ requiere SSL, agrega DB_SSL=true al .env de esa instancia.
  */
 function buildDbConfig(config: ConfigService): TypeOrmModuleOptions {
   const isProd = config.get('NODE_ENV') === 'production';
   const url = config.get<string>('DATABASE_URL');
+  const useSsl = config.get<string>('DB_SSL') === 'true';
 
-  // Logging mutable (TypeORM espera LogLevel[], no readonly array)
   const logging: ('error' | 'warn' | 'info' | 'log' | 'query')[] = isProd
     ? ['error']
     : ['error', 'warn'];
@@ -49,14 +48,14 @@ function buildDbConfig(config: ConfigService): TypeOrmModuleOptions {
       idleTimeoutMillis: 30000,
       connectionTimeoutMillis: 5000,
     },
-    ssl: isProd ? { rejectUnauthorized: false } : false,
+    // SSL solo si está explícitamente habilitado vía DB_SSL=true
+    ssl: useSsl ? { rejectUnauthorized: false } : false,
   };
 
   if (url && url.trim() !== '') {
     return { ...baseConfig, url };
   }
 
-  // Modo dev local: variables separadas
   return {
     ...baseConfig,
     host: config.get<string>('DB_HOST') || 'localhost',
@@ -69,29 +68,23 @@ function buildDbConfig(config: ConfigService): TypeOrmModuleOptions {
 
 @Module({
   imports: [
-    // ── Config global (.env) ──────────────────────────────────
     ConfigModule.forRoot({
       isGlobal: true,
       envFilePath: '.env',
     }),
 
-    // ── Logging estructurado (debe ir antes que otros módulos) ─
     LoggingModule,
 
-    // ── Cron jobs ─────────────────────────────────────────────
     ScheduleModule.forRoot(),
 
-    // ── Base de datos ─────────────────────────────────────────
     TypeOrmModule.forRootAsync({
       imports: [ConfigModule],
       inject: [ConfigService],
       useFactory: buildDbConfig,
     }),
 
-    // ── Redis ─────────────────────────────────────────────────
     RedisModule,
 
-    // ── Módulos de la app ─────────────────────────────────────
     CredentialsModule,
     GoogleDriveModule,
     NotificationsModule,
