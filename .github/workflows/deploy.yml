@@ -1,10 +1,9 @@
-name: Deploy to serverj01
+name: Deploy to Server
 
 on:
   push:
     branches:
       - main
-  workflow_dispatch: # Permite trigger manual desde la UI de GitHub
 
 jobs:
   deploy:
@@ -14,14 +13,28 @@ jobs:
       - name: Checkout código
         uses: actions/checkout@v4
 
-      - name: Deploy al servidor via Cloudflare Tunnel
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ secrets.SSH_HOST }}
-          username: ${{ secrets.SSH_USER }}
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          port: 22
-          script: |
+      - name: Instalar cloudflared
+        run: |
+          curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb -o cloudflared.deb
+          sudo dpkg -i cloudflared.deb
+
+      - name: Configurar SSH via Cloudflare Tunnel
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          cat >> ~/.ssh/config << EOF
+          Host ssh.suite-os.app
+            HostName ssh.suite-os.app
+            User ${{ secrets.SSH_USER }}
+            IdentityFile ~/.ssh/id_ed25519
+            StrictHostKeyChecking no
+            ProxyCommand cloudflared access ssh --hostname %h
+          EOF
+
+      - name: Deploy al servidor
+        run: |
+          ssh ${{ secrets.SSH_USER }}@ssh.suite-os.app << 'ENDSSH'
             set -e
 
             REPO_DIR=~/apps/suite-os-storage
@@ -29,33 +42,34 @@ jobs:
             echo "── Verificar que el repo existe ──"
             if [ ! -d "$REPO_DIR" ]; then
               echo "❌ Directorio $REPO_DIR no existe."
-              echo "   Hacer setup inicial primero (ver README.md del repo)."
+              echo "   Hacer setup inicial primero (clonar el repo y crear .env)."
               exit 1
             fi
 
             cd "$REPO_DIR"
 
-            echo "── Pull últimos cambios desde main ──"
+            echo "── Pull últimos cambios ──"
             git fetch origin main
             git reset --hard origin/main
 
             echo "── Verificar que .env existe ──"
             if [ ! -f .env ]; then
-              echo "❌ No existe .env. Hacer setup inicial primero."
+              echo "❌ No existe .env en el servidor."
+              echo "   Hacer setup inicial primero (copiar .env.example a .env)."
               exit 1
             fi
 
-            echo "── Build y restart de servicios (con --no-deps para no reiniciar DB ni Redis innecesariamente) ──"
-            docker compose pull storage_gateway 2>/dev/null || true
+            echo "── Rebuild storage_gateway ──"
             docker compose up -d --build storage_gateway
 
-            echo "── Estado de los containers ──"
+            echo "── Estado final ──"
             docker compose ps
 
             echo "── Verificar healthcheck ──"
             sleep 5
             docker compose exec -T storage_gateway wget -q --spider http://localhost:3100/api/v1/health && \
               echo "✅ Storage Gateway respondiendo OK" || \
-              echo "⚠️  Storage Gateway no responde aún (puede tardar un momento)"
+              echo "⚠️  Storage Gateway aún no responde (puede tardar un momento)"
 
             echo "✅ Deploy completado $(date)"
+          ENDSSH
