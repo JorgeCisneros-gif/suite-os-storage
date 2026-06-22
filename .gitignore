@@ -1,5 +1,7 @@
 .env
+temp-storage/
 node_modules/
 dist/
 *.log
 .DS_Store
+dist/

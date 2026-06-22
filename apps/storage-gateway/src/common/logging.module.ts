@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Module, RequestMethod } from '@nestjs/common';
 import { LoggerModule } from 'nestjs-pino';
 import { randomUUID } from 'crypto';
 import { IncomingMessage, ServerResponse } from 'http';
@@ -9,17 +9,30 @@ import { IncomingMessage, ServerResponse } from 'http';
  * Comportamientos clave:
  * - DEVELOPMENT: salida pretty-printed (colores, timestamps legibles)
  * - PRODUCTION: salida JSON (parseable por Loki/Datadog/CloudWatch)
- * - Cada request HTTP recibe un `reqId` único (cabecera x-request-id si viene,
- *   o generado nuevo)
+ * - Cada request HTTP recibe un `reqId` único
  * - Auto-log de requests HTTP (método, url, status, duración)
  * - Redacción automática de datos sensibles (tokens, claves)
- * - Logs por nivel: trace < debug < info < warn < error < fatal
+ * - Health checks y /docs excluidos para no saturar logs
  *
- * Nivel configurable vía LOG_LEVEL en .env (default: 'info' en prod, 'debug' en dev)
+ * Nivel configurable vía LOG_LEVEL en .env.
  */
 @Module({
   imports: [
     LoggerModule.forRoot({
+      // ── EXCLUDE: rutas que NO se loguean automáticamente ────
+      //
+      // Es la forma CORRECTA de excluir rutas en nestjs-pino. Funciona
+      // como un middleware NestJS, así que respeta el prefix global
+      // (api/v1) y los paths reales del router.
+      //
+      // Usar autoLogging.ignore NO funciona bien con Fastify + NestJS
+      // porque req.url se reescribe a '/' en el contexto del middleware.
+      exclude: [
+        { method: RequestMethod.GET, path: 'health' },
+        { method: RequestMethod.GET, path: 'docs' },
+        { method: RequestMethod.GET, path: 'docs/(.*)' },
+      ],
+
       pinoHttp: {
         level:
           process.env.LOG_LEVEL ||
@@ -96,25 +109,6 @@ import { IncomingMessage, ServerResponse } from 'http';
           if (err || res.statusCode >= 500) return 'error';
           if (res.statusCode >= 400) return 'warn';
           return 'info';
-        },
-
-        // No loguear health checks y docs para no saturar.
-        // En Fastify con NestJS la URL llega con el prefix global aplicado.
-        // Probamos múltiples paths posibles para ser tolerantes.
-        autoLogging: {
-          ignore: (req: any) => {
-            // Fastify expone la URL en distintos lugares según la versión
-            const url: string =
-              req.url || req.raw?.url || req.originalUrl || '';
-
-            // Ignorar health (con y sin prefix) y swagger
-            return (
-              url === '/health' ||
-              url === '/api/v1/health' ||
-              url.startsWith('/docs') ||
-              url.startsWith('/api/v1/docs')
-            );
-          },
         },
       },
     }),
