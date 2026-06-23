@@ -18,21 +18,31 @@ import { LoggingModule } from './common/logging.module';
 /**
  * Configuración TypeORM.
  *
- * Soporta dos modos de conexión:
+ * Modos de conexión:
  * 1. DATABASE_URL completa (Docker / producción)
  * 2. Variables separadas DB_HOST/DB_PORT/etc (dev local)
  *
- * SSL es OPCIONAL. Solo se activa si DB_SSL=true en el .env.
- * Para conexiones internas en Docker network NO se requiere SSL
- * (todo el tráfico es privado dentro de la red Docker).
+ * Flags configurables vía .env:
+ * - DB_SSL=true        → habilita SSL (default: false, correcto para Docker network)
+ * - DB_SYNCHRONIZE=true → TypeORM crea/actualiza tablas automáticamente
+ *                         (default: true en dev, false en producción)
  *
- * Si en el futuro conectas a una DB externa (AWS RDS, Heroku, etc.)
- * que SÍ requiere SSL, agrega DB_SSL=true al .env de esa instancia.
+ * NOTA sobre DB_SYNCHRONIZE en producción:
+ *   Por defecto, TypeORM NO sincroniza schemas en producción para evitar
+ *   pérdida de datos accidental. Pero en fase bootstrap (sin migrations
+ *   escritas y sin datos críticos), puede ser útil habilitarlo.
+ *   Una vez tengas migrations, ponlo en false definitivamente.
  */
 function buildDbConfig(config: ConfigService): TypeOrmModuleOptions {
   const isProd = config.get('NODE_ENV') === 'production';
   const url = config.get<string>('DATABASE_URL');
   const useSsl = config.get<string>('DB_SSL') === 'true';
+
+  // synchronize: si está explícitamente seteado, respeta el valor.
+  // Sino, default seguro: true en dev, false en prod.
+  const syncEnv = config.get<string>('DB_SYNCHRONIZE');
+  const synchronize =
+    syncEnv === 'true' ? true : syncEnv === 'false' ? false : !isProd;
 
   const logging: ('error' | 'warn' | 'info' | 'log' | 'query')[] = isProd
     ? ['error']
@@ -41,14 +51,13 @@ function buildDbConfig(config: ConfigService): TypeOrmModuleOptions {
   const baseConfig = {
     type: 'postgres' as const,
     entities: [StorageProvider, FileReference, NotificationLog],
-    synchronize: !isProd,
+    synchronize,
     logging,
     extra: {
       max: 10,
       idleTimeoutMillis: 30000,
       connectionTimeoutMillis: 5000,
     },
-    // SSL solo si está explícitamente habilitado vía DB_SSL=true
     ssl: useSsl ? { rejectUnauthorized: false } : false,
   };
 
