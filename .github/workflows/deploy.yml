@@ -42,34 +42,46 @@ jobs:
             echo "── Verificar que el repo existe ──"
             if [ ! -d "$REPO_DIR" ]; then
               echo "❌ Directorio $REPO_DIR no existe."
-              echo "   Hacer setup inicial primero (clonar el repo y crear .env)."
               exit 1
             fi
 
             cd "$REPO_DIR"
 
+            echo "── Detectar si docker-compose.yml cambió ──"
+            # Capturamos el hash del compose ANTES del pull
+            COMPOSE_BEFORE=$(sha256sum docker-compose.yml 2>/dev/null | cut -d' ' -f1 || echo "")
+
             echo "── Pull últimos cambios ──"
             git fetch origin main
             git reset --hard origin/main
 
+            # Capturamos el hash DESPUÉS del pull
+            COMPOSE_AFTER=$(sha256sum docker-compose.yml | cut -d' ' -f1)
+
             echo "── Verificar que .env existe ──"
             if [ ! -f .env ]; then
               echo "❌ No existe .env en el servidor."
-              echo "   Hacer setup inicial primero (copiar .env.example a .env)."
               exit 1
             fi
 
-            echo "── Rebuild storage_gateway ──"
-            docker compose up -d --build storage_gateway
+            # Si cambió el compose, hay que force-recreate (variables del environment
+            # solo se aplican al crear el container, no al hacer restart)
+            if [ "$COMPOSE_BEFORE" != "$COMPOSE_AFTER" ]; then
+              echo "── docker-compose.yml cambió → FORCE RECREATE ──"
+              docker compose up -d --build --force-recreate storage_gateway
+            else
+              echo "── docker-compose.yml sin cambios → solo rebuild ──"
+              docker compose up -d --build storage_gateway
+            fi
 
             echo "── Estado final ──"
             docker compose ps
 
             echo "── Verificar healthcheck ──"
-            sleep 5
+            sleep 8
             docker compose exec -T storage_gateway wget -q --spider http://localhost:3100/api/v1/health && \
               echo "✅ Storage Gateway respondiendo OK" || \
-              echo "⚠️  Storage Gateway aún no responde (puede tardar un momento)"
+              echo "⚠️  Storage Gateway aún no responde"
 
             echo "✅ Deploy completado $(date)"
           ENDSSH

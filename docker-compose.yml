@@ -30,11 +30,7 @@ services:
     image: redis:7-alpine
     container_name: storage_redis
     restart: unless-stopped
-    # El password se inyecta directamente al command vía interpolación
-    # de Docker Compose (resuelta en el host antes de pasar al container).
     command: redis-server --requirepass ${REDIS_PASSWORD} --appendonly yes
-    # También se expone como env var dentro del container para que
-    # redis-cli del healthcheck pueda autenticarse.
     environment:
       REDIS_PASSWORD: ${REDIS_PASSWORD}
     volumes:
@@ -42,8 +38,6 @@ services:
     networks:
       - edify_network
     healthcheck:
-      # Usamos sh -c para que la expansión de $REDIS_PASSWORD ocurra
-      # DENTRO del container (no en el host de Docker Compose).
       test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" --no-auth-warning ping | grep -q PONG"]
       interval: 10s
       timeout: 5s
@@ -62,24 +56,37 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-info}
       PORT: 3100
 
+      # ── Base de datos ────────────────────────────────────────
       DATABASE_URL: postgresql://${POSTGRES_USER:-storage_user}:${POSTGRES_PASSWORD}@storage_db:5432/${POSTGRES_DB:-suite_storage}
+      # Bootstrap: TypeORM crea tablas desde entities. Cambiar a false
+      # cuando tengas migrations escritas.
+      DB_SYNCHRONIZE: ${DB_SYNCHRONIZE:-false}
+      # SSL: solo activar si DB es externa (RDS, etc). Para Docker network: false.
+      DB_SSL: ${DB_SSL:-false}
+
+      # ── Redis ────────────────────────────────────────────────
       REDIS_URL: redis://:${REDIS_PASSWORD}@storage_redis:6379
 
+      # ── Seguridad ────────────────────────────────────────────
       ENCRYPTION_KEY: ${ENCRYPTION_KEY}
       INTERNAL_API_KEY: ${INTERNAL_API_KEY}
 
+      # ── OAuth Google ─────────────────────────────────────────
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID}
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET}
       GOOGLE_CALLBACK_URL: ${GOOGLE_CALLBACK_URL}
 
+      # ── Storage temporal ─────────────────────────────────────
       TEMP_STORAGE_DIR: /var/lib/suite-storage/temp
       DEFAULT_RETENTION_DAYS: ${DEFAULT_RETENTION_DAYS:-90}
       ERROR_RETENTION_DAYS: ${ERROR_RETENTION_DAYS:-30}
       MAX_UPLOAD_RETRIES: ${MAX_UPLOAD_RETRIES:-3}
 
+      # ── URLs frontend ────────────────────────────────────────
       DEPARMENTOS_URL: ${DEPARMENTOS_URL:-https://deparmentos.suite-os.app}
       INVENTORYOS_URL: ${INVENTORYOS_URL:-https://inventoryos.suite-os.app}
 
+      # ── CORS ─────────────────────────────────────────────────
       CORS_ORIGINS: ${CORS_ORIGINS:-https://deparmentos.suite-os.app,https://inventoryos.suite-os.app}
 
     volumes:
@@ -94,8 +101,6 @@ services:
     networks:
       - edify_network
 
-    # Puerto 3100 expuesto SOLO en localhost del server.
-    # Cloudflared (en el host) accede aquí para enrutar storage.suite-os.app
     ports:
       - "127.0.0.1:3100:3100"
 
